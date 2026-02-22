@@ -74,7 +74,7 @@ def parse_args() -> argparse.Namespace:
         "--val_as",
         choices=("test", "train", "validation", "skip"),
         default="test",
-        help="How to map CSV split=Val/Valid/Validation. If this flag is explicitly provided, the run is treated as training-only (all rows -> train).",
+        help="How to map CSV split=Val/Valid/Validation. If explicitly provided as train/test/validation, all rows are forced to that split for this run.",
     )
     parser.add_argument(
         "--allow_leakage",
@@ -233,6 +233,15 @@ def user_explicitly_set_val_as(argv: List[str]) -> bool:
     """Return True if user explicitly passed --val_as/-val_as in CLI."""
     return any(arg in {"--val_as", "-val_as"} for arg in argv)
 
+
+def explicit_forced_split(args: argparse.Namespace, argv: List[str]) -> Optional[str]:
+    """If --val_as is explicit and set to train/test/validation, force all rows there."""
+    if not user_explicitly_set_val_as(argv):
+        return None
+    if args.val_as in {"train", "test", "validation"}:
+        return args.val_as
+    return None
+
 def normalize_out_root(out_root_arg: str) -> Path:
     """Use only the first token of --out_root to avoid accidental flag suffixes."""
     text = norm_text(out_root_arg)
@@ -244,7 +253,7 @@ def normalize_out_root(out_root_arg: str) -> Path:
 
 def main() -> int:
     args = parse_args()
-    force_all_to_train = user_explicitly_set_val_as(sys.argv[1:])
+    forced_split = explicit_forced_split(args, sys.argv[1:])
 
     csv_path = Path(args.csv_path)
     images_root = Path(args.images_root)
@@ -296,10 +305,10 @@ def main() -> int:
                 patient_id = extract_patient_id_from_patch_filename(patch_filename) or "unknown_patient"
             raw_split = norm_text(row.get("split"))
 
-            # Requested behavior: if user passes --val_as, treat this run as training-only.
-            # This supports running the script separately on train/test/validation CSV files.
-            if force_all_to_train:
-                raw_split = "train"
+            # Requested behavior: if user passes --val_as with train/test/validation,
+            # force all rows into that split for this run.
+            if forced_split:
+                raw_split = forced_split
 
             if not patch_filename:
                 skipped["missing_patch_filename"] += 1
