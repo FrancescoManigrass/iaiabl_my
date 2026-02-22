@@ -6,7 +6,7 @@ This script builds the directory layout expected by IAIA-BL training scripts:
     out_root/
       train/{Circumscribed,Indistinct,Spiculated}
       test/{Circumscribed,Indistinct,Spiculated}
-      validation/{Circumscribed,Indistinct,Spiculated}  # optional, via --val_as validation
+      validation/{Circumscribed,Indistinct,Spiculated}  # optional via --val_as validation
       push/{Circumscribed,Indistinct,Spiculated}
       finer/{Circumscribed,Indistinct,Spiculated}
 
@@ -74,7 +74,7 @@ def parse_args() -> argparse.Namespace:
         "--val_as",
         choices=("test", "train", "validation", "skip"),
         default="test",
-        help="How to map CSV split=Val/Valid/Validation.",
+        help="How to map CSV split=Val/Valid/Validation. If set to train, all Train/Test/Val rows are merged into train.",
     )
     parser.add_argument(
         "--allow_leakage",
@@ -277,6 +277,10 @@ def main() -> int:
                 patient_id = extract_patient_id_from_patch_filename(patch_filename) or "unknown_patient"
             raw_split = norm_text(row.get("split"))
 
+            # Requested behavior: when --val_as train is used, merge all splits into train.
+            if args.val_as == "train":
+                raw_split = "train"
+
             if not patch_filename:
                 skipped["missing_patch_filename"] += 1
                 continue
@@ -404,4 +408,3 @@ if __name__ == "__main__":
 
 # Example usage:
 # python prepare_iaiabl_from_csv.py --csv_path validation_set.csv --images_root /data/patches --out_root /data/iaiabl_ready
-# python prepare_iaiabl_from_csv.py --csv_path validation_set.csv --images_root /data/patches --out_root /data/iaiabl_ready --val_as validation
