@@ -31,7 +31,7 @@ import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from PIL import Image
@@ -169,6 +169,15 @@ def build_unique_stem(patient_id: str, patch_filename: str) -> str:
     return f"{base}__{digest}"
 
 
+def extract_patient_id_from_patch_filename(patch_filename: str) -> Optional[str]:
+    """Extract patient id from patch filename patterns like 'P_00022_...png'."""
+    stem = Path(patch_filename).name
+    match = re.match(r"^(P_\d+)(?:_|$)", stem)
+    if match:
+        return match.group(1)
+    return None
+
+
 def ensure_layout(out_root: Path, dry_run: bool) -> None:
     for split in SPLITS:
         for cls in CLASSES:
@@ -243,7 +252,6 @@ def main() -> int:
         required_cols = {
             "patch_filename",
             "split",
-            "patient_id",
             "type_of_lesion",
             "has_mass",
             "mass_margin_CIRCUMSCRIBED",
@@ -262,7 +270,9 @@ def main() -> int:
                 break
 
             patch_filename = norm_text(row.get("patch_filename"))
-            patient_id = norm_text(row.get("patient_id")) or "unknown_patient"
+            patient_id = norm_text(row.get("patient_id"))
+            if not patient_id:
+                patient_id = extract_patient_id_from_patch_filename(patch_filename) or "unknown_patient"
             raw_split = norm_text(row.get("split"))
 
             if not patch_filename:
