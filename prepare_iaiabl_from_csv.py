@@ -227,12 +227,24 @@ def write_paths_file(out_root: Path, dry_run: bool) -> None:
     (out_root / "paths_for_train_sh.txt").write_text(content, encoding="utf-8")
 
 
+def normalize_out_root(out_root_arg: str) -> Path:
+    """Use only the first token of --out_root to avoid accidental flag suffixes."""
+    text = norm_text(out_root_arg)
+    if not text:
+        return Path(text)
+    first_token = text.split()[0]
+    return Path(first_token)
+
+
 def main() -> int:
     args = parse_args()
 
     csv_path = Path(args.csv_path)
     images_root = Path(args.images_root)
-    out_root = Path(args.out_root)
+    out_root_text = norm_text(args.out_root)
+    out_root = normalize_out_root(out_root_text)
+    if out_root_text and out_root_text.split()[0] != out_root_text:
+        print(f"WARNING: normalized out_root from {out_root_text!r} to {str(out_root)!r}")
 
     if not csv_path.exists():
         print(f"ERROR: CSV not found: {csv_path}", file=sys.stderr)
