@@ -6,6 +6,7 @@ This script builds the directory layout expected by IAIA-BL training scripts:
     out_root/
       train/{Circumscribed,Indistinct,Spiculated}
       test/{Circumscribed,Indistinct,Spiculated}
+      validation/{Circumscribed,Indistinct,Spiculated}  # optional, via --val_as validation
       push/{Circumscribed,Indistinct,Spiculated}
       finer/{Circumscribed,Indistinct,Spiculated}
 
@@ -38,7 +39,7 @@ from PIL import Image
 
 
 CLASSES = ("Circumscribed", "Indistinct", "Spiculated")
-SPLITS = ("train", "test", "push", "finer")
+SPLITS = ("train", "test", "validation", "push", "finer")
 
 
 @dataclass
@@ -71,9 +72,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--val_as",
-        choices=("test", "train", "skip"),
+        choices=("test", "train", "validation", "skip"),
         default="test",
-        help="How to map CSV split=Val.",
+        help="How to map CSV split=Val/Valid/Validation.",
     )
     parser.add_argument(
         "--allow_leakage",
@@ -218,6 +219,7 @@ def write_paths_file(out_root: Path, dry_run: bool) -> None:
         f"test_dir={out_root / 'test'}\n"
         f"push_dir={out_root / 'push'}\n"
         f"finer_dir={out_root / 'finer'}\n"
+        f"validation_dir={out_root / 'validation'}\n"
     )
     if dry_run:
         print("\n[DRY RUN] paths_for_train_sh.txt would contain:\n" + content)
@@ -245,7 +247,7 @@ def main() -> int:
     skipped = Counter()
     warnings: List[str] = []
     train_patients = set()
-    test_patients = set()
+    eval_patients = set()
 
     with csv_path.open("r", newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -317,12 +319,12 @@ def main() -> int:
 
             if split == "train":
                 train_patients.add(patient_id)
-            elif split == "test":
-                test_patients.add(patient_id)
+            elif split in {"test", "validation"}:
+                eval_patients.add(patient_id)
 
-    leakage = sorted(train_patients.intersection(test_patients))
+    leakage = sorted(train_patients.intersection(eval_patients))
     if leakage and not args.allow_leakage:
-        print("ERROR: patient leakage detected between train and test splits.", file=sys.stderr)
+        print("ERROR: patient leakage detected between train and evaluation splits (test/validation).", file=sys.stderr)
         print("Leaking patient_ids (up to 50 shown):", file=sys.stderr)
         for pid in leakage[:50]:
             print(f"  - {pid}", file=sys.stderr)
@@ -373,13 +375,14 @@ def main() -> int:
             print(f"  ... and {len(warnings)-20} more")
 
     print("\nUsed samples by split/class:")
-    for split in ("train", "test", "push"):
+    report_splits = ("train", "test", "validation", "push")
+    for split in report_splits:
         print(f"  {split}:")
         for cls in CLASSES:
             print(f"    - {cls}: {usage_counts[split][cls]}")
 
     print("\nOutput examples (up to 5 per split/class):")
-    for split in ("train", "test", "push"):
+    for split in report_splits:
         for cls in CLASSES:
             key = (split, cls)
             print(f"  {split}/{cls}:")
@@ -401,3 +404,4 @@ if __name__ == "__main__":
 
 # Example usage:
 # python prepare_iaiabl_from_csv.py --csv_path validation_set.csv --images_root /data/patches --out_root /data/iaiabl_ready
+# python prepare_iaiabl_from_csv.py --csv_path validation_set.csv --images_root /data/patches --out_root /data/iaiabl_ready --val_as validation
