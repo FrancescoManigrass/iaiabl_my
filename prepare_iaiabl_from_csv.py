@@ -74,7 +74,7 @@ def parse_args() -> argparse.Namespace:
         "--val_as",
         choices=("test", "train", "validation", "skip"),
         default="test",
-        help="How to map CSV split=Val/Valid/Validation. If set to train, all Train/Test/Val rows are merged into train.",
+        help="How to map CSV split=Val/Valid/Validation. If this flag is explicitly provided, the run is treated as training-only (all rows -> train).",
     )
     parser.add_argument(
         "--allow_leakage",
@@ -227,6 +227,12 @@ def write_paths_file(out_root: Path, dry_run: bool) -> None:
     (out_root / "paths_for_train_sh.txt").write_text(content, encoding="utf-8")
 
 
+
+
+def user_explicitly_set_val_as(argv: List[str]) -> bool:
+    """Return True if user explicitly passed --val_as/-val_as in CLI."""
+    return any(arg in {"--val_as", "-val_as"} for arg in argv)
+
 def normalize_out_root(out_root_arg: str) -> Path:
     """Use only the first token of --out_root to avoid accidental flag suffixes."""
     text = norm_text(out_root_arg)
@@ -238,6 +244,7 @@ def normalize_out_root(out_root_arg: str) -> Path:
 
 def main() -> int:
     args = parse_args()
+    force_all_to_train = user_explicitly_set_val_as(sys.argv[1:])
 
     csv_path = Path(args.csv_path)
     images_root = Path(args.images_root)
@@ -289,8 +296,9 @@ def main() -> int:
                 patient_id = extract_patient_id_from_patch_filename(patch_filename) or "unknown_patient"
             raw_split = norm_text(row.get("split"))
 
-            # Requested behavior: when --val_as train is used, merge all splits into train.
-            if args.val_as == "train":
+            # Requested behavior: if user passes --val_as, treat this run as training-only.
+            # This supports running the script separately on train/test/validation CSV files.
+            if force_all_to_train:
                 raw_split = "train"
 
             if not patch_filename:
