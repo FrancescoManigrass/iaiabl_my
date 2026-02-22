@@ -67,7 +67,7 @@ base_architecture_type = re.match('^[a-z]*', base_architecture).group(0)
 prototype_shape = (prototype_shape[0], latent_shape, prototype_shape[2], prototype_shape[3])
 print("Protoype shape: ", prototype_shape)
 
-model_dir = '/usr/xtmp/mammo/saved_models/' + base_architecture + '/' + experiment_run + '/'
+model_dir = '/media/grains6lab2/d/iaiabl_my/saved_models/' + base_architecture + '/' + experiment_run + '/'
 print("saving models to: ", model_dir)
 makedir(model_dir)
 shutil.copy(src=os.path.join(os.getcwd(), __file__), dst=model_dir)

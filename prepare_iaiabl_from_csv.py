@@ -1,25 +1,4 @@
 #!/usr/bin/env python3
-"""Prepare IAIA-BL dataset folders (.npy by class/split) from a CSV and PNG patches.
-
-This script builds the directory layout expected by IAIA-BL training scripts:
-
-    out_root/
-      train/{Circumscribed,Indistinct,Spiculated}
-      test/{Circumscribed,Indistinct,Spiculated}
-      validation/{Circumscribed,Indistinct,Spiculated}  # optional via --val_as validation
-      push/{Circumscribed,Indistinct,Spiculated}
-      finer/{Circumscribed,Indistinct,Spiculated}
-
-Input rows are filtered to replicate the IAIA-BL mass-margin setting:
-- only masses
-- only margins in {CIRCUMSCRIBED, INDISTINCT, SPICULATED}
-- rows with inconsistent one-hot margin flags are skipped
-
-PNG patches are converted to grayscale .npy arrays. The repository's dataloader uses
-np.load and skimage.resize, then Image.fromarray for augmentation. To remain compatible,
-we save uint8 arrays in [0,255] (single channel).
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -54,51 +33,29 @@ class SelectedRow:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Convert CSV+PNG patches to IAIA-BL ready class folders with .npy files."
+    p = argparse.ArgumentParser(
+        description="Convert CSV+PNG patches to IAIA-BL ready class folders with uint16 .npy files."
     )
-    parser.add_argument("--csv_path", required=True, help="Path to input CSV.")
-    parser.add_argument(
-        "--images_root",
-        required=True,
-        help="Root folder to prepend to patch_filename for reading PNG patches.",
-    )
-    parser.add_argument("--out_root", required=True, help="Output dataset root.")
-    parser.add_argument(
-        "--mode",
-        choices=("copy", "symlink"),
-        default="symlink",
-        help="copy: place real .npy files in split folders; symlink: link from _npy_cache.",
-    )
-    parser.add_argument(
-        "--val_as",
-        choices=("test", "train", "validation", "skip"),
-        default="test",
-        help="How to map CSV split=Val/Valid/Validation. If explicitly provided as train/test/validation, all rows are forced to that split for this run.",
-    )
-    parser.add_argument(
-        "--allow_leakage",
+    p.add_argument("--csv_path", required=True)
+    p.add_argument("--images_root", required=True)
+    p.add_argument("--out_root", required=True)
+    p.add_argument("--mode", choices=("copy", "symlink"), default="copy")
+    p.add_argument("--val_as", choices=("test", "train", "validation", "skip"), default="test")
+    p.add_argument("--allow_leakage", action="store_true")
+    p.add_argument("--dry_run", action="store_true")
+    p.add_argument("--max_rows", type=int, default=None)
+
+    # NEW: cache control
+    p.add_argument(
+        "--overwrite_cache",
         action="store_true",
-        help="Allow patient leakage between train and test (otherwise fail).",
+        help="Force regeneration of _npy_cache even if files already exist.",
     )
-    parser.add_argument(
-        "--dry_run",
-        action="store_true",
-        help="Only print report; do not create files.",
-    )
-    parser.add_argument(
-        "--max_rows",
-        type=int,
-        default=None,
-        help="Optional limit on processed CSV rows (debug).",
-    )
-    return parser.parse_args()
+    return p.parse_args()
 
 
-def norm_text(value: object) -> str:
-    if value is None:
-        return ""
-    return str(value).strip()
+def norm_text(v: object) -> str:
+    return "" if v is None else str(v).strip()
 
 
 def parse_intish(value: object) -> Optional[int]:
@@ -124,14 +81,10 @@ def is_mass(row: Dict[str, str]) -> bool:
 
 def map_split(raw_split: str, val_as: str) -> Optional[str]:
     s = norm_text(raw_split).lower()
-    if s == "train":
-        return "train"
-    if s == "test":
-        return "test"
+    if s in {"train", "test"}:
+        return s
     if s in {"val", "valid", "validation"}:
-        if val_as == "skip":
-            return None
-        return val_as
+        return None if val_as == "skip" else val_as
     return None
 
 
@@ -145,12 +98,11 @@ def determine_class(row: Dict[str, str]) -> Tuple[Optional[str], str]:
     if len(positives) != 1:
         return None, "inconsistent_margin_flags"
 
-    # Exclude margins outside the 3-target setting (if explicitly labeled).
-    excluded_margin_flags = [
+    excluded = [
         parse_intish(row.get("mass_margin_OBSCURED")) == 1,
         parse_intish(row.get("mass_margin_MICROLOBULATED")) == 1,
     ]
-    if any(excluded_margin_flags):
+    if any(excluded):
         return None, "excluded_margin"
 
     return positives[0], "ok"
@@ -171,41 +123,52 @@ def build_unique_stem(patient_id: str, patch_filename: str) -> str:
 
 
 def extract_patient_id_from_patch_filename(patch_filename: str) -> Optional[str]:
-    """Extract patient id from patch filename patterns like 'P_00022_...png'."""
     stem = Path(patch_filename).name
-    match = re.match(r"^(P_\d+)(?:_|$)", stem)
-    if match:
-        return match.group(1)
-    return None
+    m = re.match(r"^(P_\d+)(?:_|$)", stem)
+    return m.group(1) if m else None
 
 
 def ensure_layout(out_root: Path, dry_run: bool) -> None:
     for split in SPLITS:
         for cls in CLASSES:
-            target = out_root / split / cls
+            d = out_root / split / cls
             if not dry_run:
-                target.mkdir(parents=True, exist_ok=True)
+                d.mkdir(parents=True, exist_ok=True)
     if not dry_run:
         (out_root / "_npy_cache").mkdir(parents=True, exist_ok=True)
 
 
-def png_to_uint8_npy(source_png: Path) -> np.ndarray:
+def png_to_uint16_npy(source_png: Path) -> np.ndarray:
+    """
+    Read PNG patch preserving 16-bit grayscale when present.
+    Output: np.uint16 array in [0, 65535].
+    """
     with Image.open(source_png) as img:
-        gray = img.convert("L")
-        arr = np.array(gray)
-    if arr.dtype != np.uint8:
-        arr = arr.astype(np.uint8)
-    return arr
+        # If it is already 16-bit grayscale, keep it
+        if img.mode in ("I;16", "I;16B", "I;16L"):
+            arr = np.array(img)
+            # Ensure dtype exactly uint16
+            if arr.dtype != np.uint16:
+                arr = arr.astype(np.uint16)
+            return arr
+
+        # 8-bit grayscale -> upscale to 16-bit
+        if img.mode == "L":
+            arr8 = np.array(img, dtype=np.uint8)
+            return (arr8.astype(np.uint16) * 257)  # 0..255 -> 0..65535
+
+        # Other (RGB/RGBA/etc.) -> convert to 8-bit gray then upscale
+        gray8 = img.convert("L")
+        arr8 = np.array(gray8, dtype=np.uint8)
+        return (arr8.astype(np.uint16) * 257)
 
 
 def write_or_link(src_npy: Path, dst_npy: Path, mode: str, dry_run: bool) -> None:
     if dry_run:
         return
     dst_npy.parent.mkdir(parents=True, exist_ok=True)
-
     if dst_npy.exists() or dst_npy.is_symlink():
         dst_npy.unlink()
-
     if mode == "copy":
         shutil.copy2(src_npy, dst_npy)
     else:
@@ -227,40 +190,17 @@ def write_paths_file(out_root: Path, dry_run: bool) -> None:
     (out_root / "paths_for_train_sh.txt").write_text(content, encoding="utf-8")
 
 
-
-
-def user_explicitly_set_val_as(argv: List[str]) -> bool:
-    """Return True if user explicitly passed --val_as/-val_as in CLI."""
-    return any(arg in {"--val_as", "-val_as"} for arg in argv)
-
-
-def explicit_forced_split(args: argparse.Namespace, argv: List[str]) -> Optional[str]:
-    """If --val_as is explicit and set to train/test/validation, force all rows there."""
-    if not user_explicitly_set_val_as(argv):
-        return None
-    if args.val_as in {"train", "test", "validation"}:
-        return args.val_as
-    return None
-
 def normalize_out_root(out_root_arg: str) -> Path:
-    """Use only the first token of --out_root to avoid accidental flag suffixes."""
     text = norm_text(out_root_arg)
-    if not text:
-        return Path(text)
-    first_token = text.split()[0]
-    return Path(first_token)
+    return Path(text.split()[0]) if text else Path(text)
 
 
 def main() -> int:
     args = parse_args()
-    forced_split = explicit_forced_split(args, sys.argv[1:])
 
     csv_path = Path(args.csv_path)
     images_root = Path(args.images_root)
-    out_root_text = norm_text(args.out_root)
-    out_root = normalize_out_root(out_root_text)
-    if out_root_text and out_root_text.split()[0] != out_root_text:
-        print(f"WARNING: normalized out_root from {out_root_text!r} to {str(out_root)!r}")
+    out_root = normalize_out_root(args.out_root)
 
     if not csv_path.exists():
         print(f"ERROR: CSV not found: {csv_path}", file=sys.stderr)
@@ -300,19 +240,13 @@ def main() -> int:
                 break
 
             patch_filename = norm_text(row.get("patch_filename"))
-            patient_id = norm_text(row.get("patient_id"))
-            if not patient_id:
-                patient_id = extract_patient_id_from_patch_filename(patch_filename) or "unknown_patient"
-            raw_split = norm_text(row.get("split"))
-
-            # Requested behavior: if user passes --val_as with train/test/validation,
-            # force all rows into that split for this run.
-            if forced_split:
-                raw_split = forced_split
-
             if not patch_filename:
                 skipped["missing_patch_filename"] += 1
                 continue
+
+            patient_id = norm_text(row.get("patient_id"))
+            if not patient_id:
+                patient_id = extract_patient_id_from_patch_filename(patch_filename) or "unknown_patient"
 
             if not is_mass(row):
                 skipped["non_mass"] += 1
@@ -322,12 +256,10 @@ def main() -> int:
             if class_name is None:
                 skipped[class_reason] += 1
                 if class_reason == "inconsistent_margin_flags":
-                    warnings.append(
-                        f"Row {idx}: inconsistent target margin flags for patch '{patch_filename}'"
-                    )
+                    warnings.append(f"Row {idx}: inconsistent margin flags for '{patch_filename}'")
                 continue
 
-            split = map_split(raw_split, args.val_as)
+            split = map_split(norm_text(row.get("split")), args.val_as)
             if split is None:
                 skipped["unsupported_split"] += 1
                 continue
@@ -357,73 +289,58 @@ def main() -> int:
 
     leakage = sorted(train_patients.intersection(eval_patients))
     if leakage and not args.allow_leakage:
-        print("ERROR: patient leakage detected between train and evaluation splits (test/validation).", file=sys.stderr)
-        print("Leaking patient_ids (up to 50 shown):", file=sys.stderr)
+        print("ERROR: patient leakage between train and eval splits.", file=sys.stderr)
         for pid in leakage[:50]:
             print(f"  - {pid}", file=sys.stderr)
-        print("Use --allow_leakage to continue anyway.", file=sys.stderr)
+        print("Use --allow_leakage to continue.", file=sys.stderr)
         return 1
 
     usage_counts = defaultdict(Counter)
-    examples = defaultdict(list)
 
+    # --- MAIN WRITE LOOP ---
     for row in selected:
         cache_npy = out_root / "_npy_cache" / f"{row.unique_stem}.npy"
 
         if not args.dry_run:
-            if not cache_npy.exists():
-                arr = png_to_uint8_npy(row.source_png)
-                np.save(cache_npy, arr)
+            need_regen = args.overwrite_cache or (not cache_npy.exists())
+            if (not need_regen) and cache_npy.exists():
+                # If cache exists but is not uint16, regenerate
+                try:
+                    prev = np.load(cache_npy, mmap_mode="r")
+                    if prev.dtype != np.uint16:
+                        need_regen = True
+                except Exception:
+                    need_regen = True
+
+            if need_regen:
+                arr16 = png_to_uint16_npy(row.source_png)
+                # enforce exact dtype
+                if arr16.dtype != np.uint16:
+                    arr16 = arr16.astype(np.uint16)
+                np.save(cache_npy, arr16)
 
         split_target = out_root / row.split / row.class_name / f"{row.unique_stem}.npy"
         write_or_link(cache_npy, split_target, args.mode, args.dry_run)
         usage_counts[row.split][row.class_name] += 1
-        if len(examples[(row.split, row.class_name)]) < 5:
-            examples[(row.split, row.class_name)].append(str(split_target))
 
         if row.split == "train":
             push_target = out_root / "push" / row.class_name / f"{row.unique_stem}.npy"
             write_or_link(cache_npy, push_target, args.mode, args.dry_run)
             usage_counts["push"][row.class_name] += 1
-            if len(examples[("push", row.class_name)]) < 5:
-                examples[("push", row.class_name)].append(str(push_target))
 
     write_paths_file(out_root, args.dry_run)
 
-    print("\n=== IAIA-BL dataset preparation report ===")
-    print(f"CSV rows considered: {sum(skipped.values()) + len(selected)}")
+    print("\n=== IAIA-BL dataset preparation report (uint16) ===")
     print(f"Rows selected: {len(selected)}")
-    print("\nSkipped rows by reason:")
-    if skipped:
-        for reason, count in sorted(skipped.items()):
-            print(f"  - {reason}: {count}")
-    else:
-        print("  - none")
-
-    if warnings:
-        print("\nWarnings (first 20):")
-        for msg in warnings[:20]:
-            print(f"  - {msg}")
-        if len(warnings) > 20:
-            print(f"  ... and {len(warnings)-20} more")
+    print("Skipped rows by reason:")
+    for reason, count in sorted(skipped.items()):
+        print(f"  - {reason}: {count}")
 
     print("\nUsed samples by split/class:")
-    report_splits = ("train", "test", "validation", "push")
-    for split in report_splits:
+    for split in ("train", "test", "validation", "push"):
         print(f"  {split}:")
         for cls in CLASSES:
             print(f"    - {cls}: {usage_counts[split][cls]}")
-
-    print("\nOutput examples (up to 5 per split/class):")
-    for split in report_splits:
-        for cls in CLASSES:
-            key = (split, cls)
-            print(f"  {split}/{cls}:")
-            if examples[key]:
-                for path in examples[key]:
-                    print(f"    - {path}")
-            else:
-                print("    - (none)")
 
     if leakage and args.allow_leakage:
         print(f"\nWARNING: leakage allowed; overlapping patient_ids: {len(leakage)}")
@@ -434,6 +351,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-# Example usage:
-# python prepare_iaiabl_from_csv.py --csv_path validation_set.csv --images_root /data/patches --out_root /data/iaiabl_ready

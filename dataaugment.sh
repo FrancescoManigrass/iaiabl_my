@@ -1,5 +1,5 @@
 #!/bin/bash
 
-source /home/virtual_envs/ml/bin/activate
+conda activate nesy-mammography
 
 srun -u python dataHandling.py
